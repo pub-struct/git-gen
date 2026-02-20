@@ -1,0 +1,22 @@
+{
+  "name": "git-gen-cli",
+  "version": "0.0.1",
+  "module": "index.ts",
+  "type": "module",
+  "bin": {
+    "git-gen": "index.ts"
+  },
+  "scripts": {
+    "dev": "bun run index.ts",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.49"
+  }
+}
