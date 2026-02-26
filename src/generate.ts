@@ -1,7 +1,11 @@
-import { unstable_v2_prompt } from "@anthropic-ai/claude-agent-sdk";
+import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { getChangedFiles, getGitDiff } from "./git.ts";
+import { readMultiLine } from "./input.ts";
 
 import { Glob } from "bun";
+
+const DIM = "\x1b[2m";
+const RESET = "\x1b[0m";
 
 async function getAvailablePrompts(): Promise<string[]> {
 	const promptDir = `${import.meta.dir}/prompt`;
@@ -48,7 +52,7 @@ export async function generate() {
 	}
 
 	const ticket = prompt("JIRA ticket number (or press enter to skip):") ?? "";
-	const summary = prompt("Paste the JIRA ticket summary:") ?? "";
+	const summary = await readMultiLine("Paste the JIRA ticket summary:");
 
 	const companyPrompt = await Bun.file(
 		`${import.meta.dir}/prompt/${company}.md`,
@@ -94,17 +98,46 @@ PR_BODY
 
 	console.log("\nGenerating with Claude...\n");
 
-	const result = await unstable_v2_prompt(userPrompt, {
-		model: "claude-sonnet-4-6",
+	const stream = query({
+		prompt: userPrompt,
+		options: {
+			model: "claude-sonnet-4-6",
+			maxTurns: 1,
+			thinking: { type: "enabled", budgetTokens: 10000 },
+			includePartialMessages: true,
+			tools: [],
+		},
 	});
 
-	if (result.subtype !== "success") {
-		console.error("Generation failed:", result.subtype);
+	let responseText = "";
+
+	for await (const message of stream) {
+		if (message.type === "stream_event") {
+			const event = message.event;
+			if (event.type === "content_block_delta") {
+				if (event.delta.type === "thinking_delta") {
+					process.stderr.write(`${DIM}${event.delta.thinking}${RESET}`);
+				} else if (event.delta.type === "text_delta") {
+					responseText += event.delta.text;
+				}
+			}
+		} else if (message.type === "result") {
+			if (message.subtype !== "success") {
+				console.error("Generation failed:", message.subtype);
+				process.exit(1);
+			}
+			break;
+		}
+	}
+
+	process.stderr.write("\n");
+
+	if (!responseText.trim()) {
+		console.error("Empty response from Claude.");
 		process.exit(1);
 	}
 
-	const response = result.result;
-	const parsed = parseResponse(response);
+	const parsed = parseResponse(responseText);
 
 	console.log("── Commit Message ──");
 	console.log(parsed.commitMessage);
