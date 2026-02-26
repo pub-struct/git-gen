@@ -1,11 +1,9 @@
+import * as p from "@clack/prompts";
 import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import { getChangedFiles, getGitDiff } from "./git.ts";
+import { getChangedFiles, getGitDiff, gitCommit, gitPushAndCreatePR } from "./git.ts";
 import { readMultiLine } from "./input.ts";
 
 import { Glob } from "bun";
-
-const DIM = "\x1b[2m";
-const RESET = "\x1b[0m";
 
 async function getAvailablePrompts(): Promise<string[]> {
 	const promptDir = `${import.meta.dir}/prompt`;
@@ -27,19 +25,20 @@ async function detectCompany(): Promise<string | null> {
 }
 
 export async function generate() {
+	p.intro("git-gen");
+
 	const company = await detectCompany();
 	if (!company) {
 		const available = await getAvailablePrompts();
-		console.error("Could not detect project from current directory.");
 		if (available.length) {
-			console.error(`Available prompts: ${available.join(", ")}`);
+			p.log.error(`Could not detect project. Available prompts: ${available.join(", ")}`);
 		} else {
-			console.error("No prompt files found in src/prompt/. Add a <name>.md file.");
+			p.log.error("No prompt files found in src/prompt/. Add a <name>.md file.");
 		}
 		process.exit(1);
 	}
 
-	console.log(`Detected project: ${company}\n`);
+	p.log.info(`Detected project: ${company}`);
 
 	const [diff, changedFiles] = await Promise.all([
 		getGitDiff(),
@@ -47,12 +46,21 @@ export async function generate() {
 	]);
 
 	if (!diff.trim() && !changedFiles.trim()) {
-		console.error("No git changes detected. Stage or modify files first.");
+		p.log.error("No git changes detected. Stage or modify files first.");
 		process.exit(1);
 	}
 
-	const ticket = prompt("JIRA ticket number (or press enter to skip):") ?? "";
-	const summary = await readMultiLine("Paste the JIRA ticket summary:");
+	const ticket = await p.text({
+		message: "JIRA ticket number (or press enter to skip):",
+		placeholder: "e.g. PROJ-123",
+	});
+	if (p.isCancel(ticket)) {
+		p.cancel("Cancelled.");
+		process.exit(0);
+	}
+
+	p.log.step("Paste the JIRA ticket summary (press Enter twice to finish):");
+	const summary = await readMultiLine("");
 
 	const companyPrompt = await Bun.file(
 		`${import.meta.dir}/prompt/${company}.md`,
@@ -96,7 +104,8 @@ PR_TITLE
 PR_BODY
 <the PR body in markdown>`;
 
-	console.log("\nGenerating with Claude...\n");
+	const s = p.spinner();
+	s.start("Generating with Claude...");
 
 	const stream = query({
 		prompt: userPrompt,
@@ -116,35 +125,68 @@ PR_BODY
 			const event = message.event;
 			if (event.type === "content_block_delta") {
 				if (event.delta.type === "thinking_delta") {
-					process.stderr.write(`${DIM}${event.delta.thinking}${RESET}`);
+					const snippet = event.delta.thinking.replace(/\n/g, " ").slice(-60);
+					s.message(`Thinking: ...${snippet}`);
 				} else if (event.delta.type === "text_delta") {
+					s.message("Writing response...");
 					responseText += event.delta.text;
 				}
 			}
 		} else if (message.type === "result") {
 			if (message.subtype !== "success") {
-				console.error("Generation failed:", message.subtype);
+				s.stop("Generation failed.");
+				p.log.error(`Failed: ${message.subtype}`);
 				process.exit(1);
 			}
 			break;
 		}
 	}
 
-	process.stderr.write("\n");
+	s.stop("Generation complete.");
 
 	if (!responseText.trim()) {
-		console.error("Empty response from Claude.");
+		p.log.error("Empty response from Claude.");
 		process.exit(1);
 	}
 
 	const parsed = parseResponse(responseText);
 
-	console.log("── Commit Message ──");
-	console.log(parsed.commitMessage);
-	console.log("\n── PR Title ──");
-	console.log(parsed.prTitle);
-	console.log("\n── PR Body ──");
-	console.log(parsed.prBody);
+	p.note(parsed.commitMessage, "Commit Message");
+	p.note(parsed.prTitle, "PR Title");
+	p.note(parsed.prBody, "PR Body");
+
+	const shouldCommit = await p.confirm({
+		message: "Commit and open PR?",
+	});
+	if (p.isCancel(shouldCommit) || !shouldCommit) {
+		p.outro("Done!");
+		process.exit(0);
+	}
+
+	const commitSpinner = p.spinner();
+	commitSpinner.start("Committing changes...");
+	try {
+		await gitCommit(parsed.commitMessage);
+		commitSpinner.stop("Changes committed.");
+	} catch (err) {
+		commitSpinner.stop("Commit failed.");
+		p.log.error(String(err));
+		process.exit(1);
+	}
+
+	const prSpinner = p.spinner();
+	prSpinner.start("Pushing and creating PR...");
+	try {
+		await gitPushAndCreatePR(parsed.prTitle, parsed.prBody);
+		prSpinner.stop("PR created.");
+	} catch (err) {
+		prSpinner.stop("PR creation failed.");
+		p.log.warning("Commit already landed. Push/PR failed:");
+		p.log.error(String(err));
+		process.exit(1);
+	}
+
+	p.outro("All done!");
 }
 
 interface ParsedResponse {

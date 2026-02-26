@@ -7,7 +7,7 @@ export function readMultiLine(message: string): Promise<string> {
 			output: process.stderr,
 		});
 
-		console.error(`${message} (press Enter twice to finish)`);
+		if (message) console.error(`${message} (press Enter twice to finish)`);
 
 		const lines: string[] = [];
 

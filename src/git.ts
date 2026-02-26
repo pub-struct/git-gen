@@ -11,3 +11,13 @@ export async function getGitDiff(): Promise<string> {
 export async function getChangedFiles(): Promise<string> {
 	return await $`git status --short`.text();
 }
+
+export async function gitCommit(message: string): Promise<void> {
+	await $`git add -A`;
+	await $`git commit -m ${message}`;
+}
+
+export async function gitPushAndCreatePR(title: string, body: string): Promise<void> {
+	await $`git push -u origin HEAD`;
+	await $`gh pr create --title ${title} --body ${body} --web`;
+}
