@@ -17,7 +17,10 @@ export async function gitCommit(message: string): Promise<void> {
 	await $`git commit -m ${message}`;
 }
 
-export async function gitPushAndCreatePR(title: string, body: string): Promise<void> {
+export async function gitPush(): Promise<void> {
 	await $`git push -u origin HEAD`;
+}
+
+export async function gitCreatePR(title: string, body: string): Promise<void> {
 	await $`gh pr create --title ${title} --body ${body} --web`;
 }

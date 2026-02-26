@@ -1,6 +1,6 @@
 import * as p from "@clack/prompts";
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { getChangedFiles, getGitDiff, gitCommit, gitPushAndCreatePR } from "./git.ts";
+import { getChangedFiles, getGitDiff, gitCommit, gitPush, gitCreatePR } from "./git.ts";
 import { readMultiLine } from "./input.ts";
 
 import { Glob } from "bun";
@@ -245,8 +245,27 @@ PR_BODY
 		process.exit(1);
 	}
 
+	const shouldPush = await p.confirm({
+		message: "Push to remote?",
+	});
+	if (p.isCancel(shouldPush) || !shouldPush) {
+		p.outro("Done!");
+		process.exit(0);
+	}
+
+	const pushSpinner = p.spinner();
+	pushSpinner.start("Pushing...");
+	try {
+		await gitPush();
+		pushSpinner.stop("Pushed.");
+	} catch (err) {
+		pushSpinner.stop("Push failed.");
+		p.log.error(String(err));
+		process.exit(1);
+	}
+
 	const shouldPR = await p.confirm({
-		message: "Push and open PR?",
+		message: "Open PR?",
 	});
 	if (p.isCancel(shouldPR) || !shouldPR) {
 		p.outro("Done!");
@@ -254,13 +273,12 @@ PR_BODY
 	}
 
 	const prSpinner = p.spinner();
-	prSpinner.start("Pushing and creating PR...");
+	prSpinner.start("Creating PR...");
 	try {
-		await gitPushAndCreatePR(parsed.prTitle, parsed.prBody);
+		await gitCreatePR(parsed.prTitle, parsed.prBody);
 		prSpinner.stop("PR created.");
 	} catch (err) {
 		prSpinner.stop("PR creation failed.");
-		p.log.warning("Commit already landed. Push/PR failed:");
 		p.log.error(String(err));
 		process.exit(1);
 	}
