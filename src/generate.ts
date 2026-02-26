@@ -156,7 +156,7 @@ PR_BODY
 	p.note(parsed.prBody, "PR Body");
 
 	const shouldCommit = await p.confirm({
-		message: "Commit and open PR?",
+		message: "Commit changes?",
 	});
 	if (p.isCancel(shouldCommit) || !shouldCommit) {
 		p.outro("Done!");
@@ -172,6 +172,14 @@ PR_BODY
 		commitSpinner.stop("Commit failed.");
 		p.log.error(String(err));
 		process.exit(1);
+	}
+
+	const shouldPR = await p.confirm({
+		message: "Push and open PR?",
+	});
+	if (p.isCancel(shouldPR) || !shouldPR) {
+		p.outro("Done!");
+		process.exit(0);
 	}
 
 	const prSpinner = p.spinner();
