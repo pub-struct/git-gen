@@ -1,5 +1,5 @@
 import * as p from "@clack/prompts";
-import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query } from "@anthropic-ai/claude-agent-sdk";
 import { getChangedFiles, getGitDiff, gitCommit, gitPushAndCreatePR } from "./git.ts";
 import { readMultiLine } from "./input.ts";
 
@@ -120,29 +120,100 @@ PR_BODY
 
 	let responseText = "";
 
-	for await (const message of stream) {
-		if (message.type === "stream_event") {
-			const event = message.event;
-			if (event.type === "content_block_delta") {
-				if (event.delta.type === "thinking_delta") {
-					const snippet = event.delta.thinking.replace(/\n/g, " ").slice(-60);
-					s.message(`Thinking: ...${snippet}`);
-				} else if (event.delta.type === "text_delta") {
-					s.message("Writing response...");
-					responseText += event.delta.text;
-				}
-			}
-		} else if (message.type === "result") {
-			if (message.subtype !== "success") {
-				s.stop("Generation failed.");
-				p.log.error(`Failed: ${message.subtype}`);
-				process.exit(1);
-			}
-			break;
+	// Queue-based async iterable for streaming thinking chunks to p.stream
+	let thinkingResolve: ((value: IteratorResult<string>) => void) | null = null;
+	const thinkingQueue: string[] = [];
+	let thinkingDone = false;
+
+	function pushThinking(chunk: string) {
+		if (thinkingResolve) {
+			const resolve = thinkingResolve;
+			thinkingResolve = null;
+			resolve({ value: chunk, done: false });
+		} else {
+			thinkingQueue.push(chunk);
 		}
 	}
 
-	s.stop("Generation complete.");
+	function endThinking() {
+		thinkingDone = true;
+		if (thinkingResolve) {
+			const resolve = thinkingResolve;
+			thinkingResolve = null;
+			resolve({ value: undefined as any, done: true });
+		}
+	}
+
+	const thinkingIterable: AsyncIterable<string> = {
+		[Symbol.asyncIterator]() {
+			return {
+				next() {
+					if (thinkingQueue.length > 0) {
+						return Promise.resolve({ value: thinkingQueue.shift()!, done: false });
+					}
+					if (thinkingDone) {
+						return Promise.resolve({ value: undefined as any, done: true });
+					}
+					return new Promise(resolve => { thinkingResolve = resolve; });
+				},
+			};
+		},
+	};
+
+	// Start streaming thinking to the UI in parallel with consuming the SDK stream
+	let thinkingStarted = false;
+	let streamDone = false;
+	let streamError: string | null = null;
+
+	const consumeStream = (async () => {
+		for await (const message of stream) {
+			if (message.type === "stream_event") {
+				const event = message.event;
+				if (event.type === "content_block_delta") {
+					const delta = event.delta as any;
+					if (delta.type === "thinking_delta") {
+						if (!thinkingStarted) {
+							thinkingStarted = true;
+							s.stop("Claude is thinking...");
+						}
+						pushThinking(delta.thinking);
+					} else if (delta.type === "text_delta") {
+						responseText += delta.text;
+					}
+				} else if (event.type === "content_block_stop") {
+					// A block ended — if thinking was active, close the thinking stream
+					if (thinkingStarted && !thinkingDone) {
+						endThinking();
+					}
+				}
+			} else if (message.type === "result") {
+				if ((message as any).subtype !== "success") {
+					streamError = (message as any).subtype;
+				}
+				break;
+			}
+		}
+		if (!thinkingDone) endThinking();
+		streamDone = true;
+	})();
+
+	// Stream thinking to the terminal in real-time
+	await p.stream.step(thinkingIterable);
+
+	// Wait for the full stream to finish (text_delta accumulation)
+	if (!streamDone) {
+		const s2 = p.spinner();
+		s2.start("Writing response...");
+		await consumeStream;
+		s2.stop("Generation complete.");
+	} else {
+		await consumeStream;
+	}
+
+	if (streamError) {
+		p.log.error(`Generation failed: ${streamError}`);
+		process.exit(1);
+	}
 
 	if (!responseText.trim()) {
 		p.log.error("Empty response from Claude.");
