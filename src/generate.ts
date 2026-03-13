@@ -1,7 +1,8 @@
 import * as p from "@clack/prompts";
-import { query } from "@anthropic-ai/claude-agent-sdk";
 import { getChangedFiles, getGitDiff, gitCommit, gitPush, gitCreatePR } from "./git.ts";
 import { readMultiLine } from "./input.ts";
+import { getConfig } from "./config.ts";
+import { getProvider } from "./providers/index.ts";
 
 import { Glob } from "bun";
 
@@ -26,6 +27,9 @@ async function detectCompany(): Promise<string | null> {
 
 export async function generate() {
 	p.intro("git-gen");
+
+	const config = await getConfig();
+	const provider = getProvider(config.provider);
 
 	const company = await detectCompany();
 	if (!company) {
@@ -105,20 +109,7 @@ PR_BODY
 <the PR body in markdown>`;
 
 	const s = p.spinner();
-	s.start("Generating with Claude...");
-
-	const stream = query({
-		prompt: userPrompt,
-		options: {
-			model: "claude-sonnet-4-6",
-			maxTurns: 1,
-			thinking: { type: "enabled", budgetTokens: 10000 },
-			includePartialMessages: true,
-			tools: [],
-		},
-	});
-
-	let responseText = "";
+	s.start(`Generating with ${provider.name}...`);
 
 	// Queue-based async iterable for streaming thinking chunks to p.stream
 	let thinkingResolve: ((value: IteratorResult<string>) => void) | null = null;
@@ -160,63 +151,55 @@ PR_BODY
 		},
 	};
 
-	// Start streaming thinking to the UI in parallel with consuming the SDK stream
 	let thinkingStarted = false;
 	let streamDone = false;
-	let streamError: string | null = null;
 
-	const consumeStream = (async () => {
-		for await (const message of stream) {
-			if (message.type === "stream_event") {
-				const event = message.event;
-				if (event.type === "content_block_delta") {
-					const delta = event.delta as any;
-					if (delta.type === "thinking_delta") {
-						if (!thinkingStarted) {
-							thinkingStarted = true;
-							s.stop("Claude is thinking...");
-						}
-						pushThinking(delta.thinking);
-					} else if (delta.type === "text_delta") {
-						responseText += delta.text;
-					}
-				} else if (event.type === "content_block_stop") {
-					// A block ended — if thinking was active, close the thinking stream
-					if (thinkingStarted && !thinkingDone) {
-						endThinking();
-					}
-				}
-			} else if (message.type === "result") {
-				if ((message as any).subtype !== "success") {
-					streamError = (message as any).subtype;
-				}
-				break;
-			}
+	const generatePromise = (async () => {
+		try {
+			const responseText = await provider.generate(userPrompt, {
+				onThinkingStart() {
+					thinkingStarted = true;
+					s.stop(`${provider.name} is thinking...`);
+				},
+				onThinkingChunk(chunk) {
+					pushThinking(chunk);
+				},
+				onThinkingEnd() {
+					endThinking();
+				},
+				onGenerating() {
+					// For providers without thinking (like Auggie), just keep the spinner going
+				},
+			});
+			streamDone = true;
+			return responseText;
+		} catch (err) {
+			streamDone = true;
+			if (!thinkingDone) endThinking();
+			throw err;
+		} finally {
+			if (!thinkingDone) endThinking();
 		}
-		if (!thinkingDone) endThinking();
-		streamDone = true;
 	})();
 
-	// Stream thinking to the terminal in real-time
-	await p.stream.step(thinkingIterable);
+	// Stream thinking to the terminal in real-time (only shows if provider emits thinking)
+	if (thinkingStarted || !streamDone) {
+		await p.stream.step(thinkingIterable);
+	}
 
-	// Wait for the full stream to finish (text_delta accumulation)
+	let responseText: string;
 	if (!streamDone) {
 		const s2 = p.spinner();
 		s2.start("Writing response...");
-		await consumeStream;
+		responseText = await generatePromise;
 		s2.stop("Generation complete.");
 	} else {
-		await consumeStream;
-	}
-
-	if (streamError) {
-		p.log.error(`Generation failed: ${streamError}`);
-		process.exit(1);
+		responseText = await generatePromise;
+		s.stop("Generation complete.");
 	}
 
 	if (!responseText.trim()) {
-		p.log.error("Empty response from Claude.");
+		p.log.error(`Empty response from ${provider.name}.`);
 		process.exit(1);
 	}
 

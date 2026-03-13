@@ -10,7 +10,17 @@ if (command === "help") {
   console.log("\nUsage: git-gen <command>\n");
   console.log("Commands:");
   console.log("  generate  Analyze git changes and generate commit/PR messages (default)");
+  console.log("  setup     Configure AI provider (Claude or Auggie)");
   console.log("  help      Show this help message");
+  process.exit(0);
+}
+
+if (command === "setup") {
+  const { setupProvider } = await import("./src/config.ts");
+  const { intro, outro } = await import("@clack/prompts");
+  intro("git-gen setup");
+  await setupProvider();
+  outro("Setup complete!");
   process.exit(0);
 }
 
