@@ -21,6 +21,22 @@ export async function gitPush(): Promise<void> {
 	await $`git push -u origin HEAD`;
 }
 
-export async function gitCreatePR(title: string, body: string): Promise<void> {
+export interface CreatePROptions {
+	draft?: boolean;
+}
+
+export async function gitCreatePR(
+	title: string,
+	body: string,
+	options: CreatePROptions = {},
+): Promise<void> {
+	if (options.draft) {
+		// Create the draft PR directly (no manual confirmation), then open it.
+		await $`gh pr create --draft --title ${title} --body ${body}`;
+		await $`gh pr view --web`;
+		return;
+	}
+
+	// Default: open the pre-filled compare page in the browser to confirm.
 	await $`gh pr create --title ${title} --body ${body} --web`;
 }

@@ -1,6 +1,19 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { LLMProvider, LLMCallbacks } from "./types.ts";
 
+// The agent SDK spawns a nested `claude` subprocess. When git-gen runs from
+// inside a Claude Code session, that subprocess inherits CLAUDE_CODE_* env vars
+// and refuses to start (recursion guard). Strip them so it always spawns clean.
+function cleanEnv(): Record<string, string> {
+	const env: Record<string, string> = {};
+	for (const [key, value] of Object.entries(process.env)) {
+		if (value === undefined) continue;
+		if (key === "CLAUDECODE" || key.startsWith("CLAUDE_CODE")) continue;
+		env[key] = value;
+	}
+	return env;
+}
+
 export const claudeProvider: LLMProvider = {
 	name: "Claude",
 
@@ -13,6 +26,7 @@ export const claudeProvider: LLMProvider = {
 				thinking: { type: "enabled", budgetTokens: 10000 },
 				includePartialMessages: true,
 				tools: [],
+				env: cleanEnv(),
 			},
 		});
 
